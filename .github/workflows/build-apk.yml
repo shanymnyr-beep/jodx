@@ -1,0 +1,227 @@
+name: Build City Wanderer - Godot 4.7.2 Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify original game.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f game.zip
+          unzip -tq game.zip
+          echo "game.zip is valid."
+          unzip -l game.zip | tail -n 5
+
+      - name: Extract game.zip without removing project files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _build_game
+          mkdir -p _build_game
+          unzip -q game.zip -d _build_game
+          test -f _build_game/project.godot
+          test -f _build_game/export_presets.cfg
+          test -f "_build_game/scenes/Main.tscn"
+          test -f "_build_game/scenes/Player.tscn"
+          test -f "_build_game/scripts/main.gd"
+          test -f "_build_game/scripts/city.gd"
+          test -f "_build_game/scripts/player.gd"
+          test -f "_build_game/assets/characters/Model/characterMedium.fbx"
+          test -d "_build_game/assets/city_kit/Models/GLB format"
+          echo "Project extracted and required original files are present."
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.1"
+          yes | sdkmanager --licenses >/dev/null || true
+          adb version
+          sdkmanager --list_installed | grep -E 'platform-tools|platforms;android-35|build-tools;35.0.1'
+
+      - name: Download Godot 4.7.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/godot"
+          cd "$RUNNER_TEMP/godot"
+
+          GODOT_FILE="Godot_v4.7.2-stable_linux.x86_64.zip"
+          GODOT_SHA256="cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4"
+
+          download() {
+            local url="$1"
+            echo "Downloading: $url"
+            curl -fL \
+              --retry 8 \
+              --retry-all-errors \
+              --retry-delay 5 \
+              --connect-timeout 30 \
+              --max-time 900 \
+              -o "$GODOT_FILE" \
+              "$url"
+          }
+
+          rm -f "$GODOT_FILE"
+
+          # Official Godot download endpoint first.
+          if ! download "https://downloads.godotengine.org/4.7.2/Godot_v4.7.2-stable_linux.x86_64.zip"; then
+            echo "Official endpoint failed; using the Godot Engine mirror."
+            rm -f "$GODOT_FILE"
+            download "https://sourceforge.net/projects/godot-engine.mirror/files/4.7.2-stable/$GODOT_FILE/download"
+          fi
+
+          echo "$GODOT_SHA256  $GODOT_FILE" | sha256sum -c -
+          unzip -q "$GODOT_FILE"
+          GODOT_BIN="$(find "$PWD" -maxdepth 2 -type f -name 'Godot_v4.7.2-stable_linux.x86_64' -print -quit)"
+          test -n "$GODOT_BIN"
+          chmod +x "$GODOT_BIN"
+          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
+          "$GODOT_BIN" --version
+
+      - name: Download matching Android export template
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.7.2.stable"
+          mkdir -p "$TEMPLATE_DIR"
+          cd "$RUNNER_TEMP/godot"
+
+          TEMPLATE="android_debug.apk"
+          TEMPLATE_URL="https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_android_debug.apk"
+
+          curl -fL \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 1200 \
+            -o "$TEMPLATE" \
+            "$TEMPLATE_URL"
+
+          test -s "$TEMPLATE"
+          cp "$TEMPLATE" "$TEMPLATE_DIR/android_debug.apk"
+
+          printf '4.7.2.stable' > "$TEMPLATE_DIR/version.txt"
+          test -s "$TEMPLATE_DIR/android_debug.apk"
+          test -s "$TEMPLATE_DIR/version.txt"
+          ls -lh "$TEMPLATE_DIR/android_debug.apk"
+          cat "$TEMPLATE_DIR/version.txt"
+
+      - name: Configure Godot Android export
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.android" "$HOME/.config/godot"
+
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+          # Android export on this project requires ETC2/ASTC import.
+          # Add only the missing project setting; all original project content stays intact.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("_build_game/project.godot")
+          s = p.read_text(encoding="utf-8")
+
+          setting = "textures/vram_compression/import_etc2_astc=true"
+
+          if setting not in s:
+              if "[rendering]" in s:
+                  s = s.replace(
+                      "[rendering]\n",
+                      "[rendering]\n" + setting + "\n",
+                      1,
+                  )
+              else:
+                  s += "\n[rendering]\n" + setting + "\n"
+              p.write_text(s, encoding="utf-8")
+
+          print("ETC2/ASTC:", setting in p.read_text(encoding="utf-8"))
+          PY
+
+          "$GODOT_BIN" --version
+          "$GODOT_BIN" --headless --path "$GITHUB_WORKSPACE/_build_game" --editor --quit
+
+      - name: Validate project and export APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/_build_game/output"
+
+          "$GODOT_BIN" \
+            --headless \
+            --path "$GITHUB_WORKSPACE/_build_game" \
+            --editor \
+            --quit
+
+          "$GODOT_BIN" \
+            --headless \
+            --path "$GITHUB_WORKSPACE/_build_game" \
+            --export-debug \
+            "Android" \
+            "$GITHUB_WORKSPACE/_build_game/output/City-Wanderer-debug.apk"
+
+          test -s "$GITHUB_WORKSPACE/_build_game/output/City-Wanderer-debug.apk"
+          file "$GITHUB_WORKSPACE/_build_game/output/City-Wanderer-debug.apk"
+          ls -lh "$GITHUB_WORKSPACE/_build_game/output/City-Wanderer-debug.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: City-Wanderer-Android-Godot-4.7.2
+          path: _build_game/output/City-Wanderer-debug.apk
+          if-no-files-found: error
