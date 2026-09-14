@@ -1,0 +1,80 @@
+name: Build Godot Android Game
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: barichello/godot-ci:4.7.2
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _game build
+          mkdir _game
+          ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n1)"
+          test -n "$ZIP"
+          unzip -q "$ZIP" -d _game
+          P="$(find _game -maxdepth 4 -type f -name project.godot -print -quit)"
+          test -n "$P"
+          cp -a "$(dirname "$P")" build
+          rm -rf build/.godot
+          mkdir -p build/output
+          test -f build/export_presets.cfg
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('build/project.godot')
+          s=p.read_text()
+          marker='textures/vram_compression/import_etc2_astc='
+          if marker not in s:
+              s += '\n[rendering]\ntextures/vram_compression/import_etc2_astc=true\n'
+          p.write_text(s)
+          PY
+
+      - name: Android setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android" "$HOME/.config/godot"
+          keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Android Debug,O=Android,C=US'
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+          godot --version
+
+      - name: Validate and export
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path "$GITHUB_WORKSPACE/build" --editor --quit
+          godot --headless --path "$GITHUB_WORKSPACE/build" \
+            --export-debug "Android" \
+            "$GITHUB_WORKSPACE/build/output/City-Wanderer-debug.apk"
+          test -s "$GITHUB_WORKSPACE/build/output/City-Wanderer-debug.apk"
+          ls -lh "$GITHUB_WORKSPACE/build/output/City-Wanderer-debug.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: City-Wanderer-Android
+          path: build/output/City-Wanderer-debug.apk
+          if-no-files-found: error
