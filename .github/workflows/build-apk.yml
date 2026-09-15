@@ -1,0 +1,80 @@
+name: Build Cowboy Runner Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Godot project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="CowboyRunnerGodot.zip"
+
+          echo "Checking ZIP..."
+          test -f "$ZIP_FILE"
+
+          rm -rf .godot_project
+          mkdir -p .godot_project
+
+          echo "Extracting $ZIP_FILE..."
+          unzip -q "$ZIP_FILE" -d .godot_project
+
+          echo "Extraction completed."
+
+      - name: Find Godot project
+        id: find-project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_FILE="$(find "$GITHUB_WORKSPACE/.godot_project" \
+            -type f \
+            -name "project.godot" \
+            -print -quit)"
+
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ERROR: project.godot not found."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
+
+          if [ ! -f "$PROJECT_DIR/export_presets.cfg" ]; then
+            echo "ERROR: export_presets.cfg not found."
+            exit 1
+          fi
+
+          echo "Godot project found:"
+          echo "$PROJECT_DIR"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android ARM64
+        id: build
+        uses: mlm-games/godot-build-action@v1.3.1
+        with:
+          GODOT_VER: "4.7.2-stable"
+          EXPORT_PRESET_NAME: "Android arm64"
+          PROJECT_DIR: "${{ steps.find-project.outputs.project_dir }}"
+          EXPORT_DIR: "builds"
+          DEBUG_MODE: "false"
+          GODOT_PREVIEW_BUILDS: "false"
+          VERBOSE_IMPORT: "true"
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cowboy-runner-android-arm64
+          path: ${{ steps.build.outputs.build }}
+          if-no-files-found: error
